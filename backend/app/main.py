@@ -3,6 +3,7 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.simulator.metrics import get_service_metrics
+from app.simulator.logs import get_service_logs, get_logs_for_service
 
 from app.core.state import LEARNED_OUTCOMES
 from app.database import (
@@ -25,6 +26,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def build_log_evidence(service_name: str):
+    logs = get_logs_for_service(service_name)
+
+    evidence = []
+
+    for log in logs:
+        if log["level"] in ["WARN", "ERROR"]:
+            evidence.append(
+                f"Log evidence [{log['level']}]: {log['message']}"
+            )
+
+    return evidence[:3]
 
 @app.get("/")
 def root():
@@ -117,6 +131,7 @@ def simulate_memory_leak():
                 "Issue started after latest deployment",
                 "Checkout timeout errors increased",
                 "Payment-service logs show object cache growth",
+                *build_log_evidence("payment-service"),
             ],
         },
         "remediation": {
@@ -183,6 +198,7 @@ def simulate_cpu_spike():
                 "CPU usage crossed 90%",
                 "Request volume increased suddenly",
                 "No deployment change detected",
+                *build_log_evidence("inventory-service"),
             ],
         },
         "remediation": {
@@ -239,6 +255,10 @@ def learned_outcomes():
 def get_metrics():
     return get_service_metrics()
 
+@app.get("/logs")
+def get_logs():
+    return get_service_logs()
+
 @app.post("/observer/scan")
 def observer_scan():
     metrics = get_service_metrics()
@@ -284,6 +304,7 @@ def observer_scan():
                         f"Memory usage reached {metric['memory']}%",
                         f"Latency is {metric['latency_ms']}ms",
                         f"Error rate is {metric['error_rate']}%",
+                        *build_log_evidence(service),
                     ],
                 },
                 "remediation": {
@@ -370,6 +391,7 @@ def observer_scan():
                         f"CPU usage reached {metric['cpu']}%",
                         f"Latency is {metric['latency_ms']}ms",
                         "Service is stateless and safe to scale",
+                        *build_log_evidence(service),
                     ],
                 },
                 "remediation": {
@@ -421,145 +443,4 @@ def observer_scan():
         "scanned_services": len(metrics),
         "created_incidents": created_incidents,
         "skipped_incidents": skipped_incidents,
-    }
-    
-    metrics = get_service_metrics()
-    created_incidents = []
-
-    for metric in metrics:
-        service = metric["service"]
-        now = datetime.utcnow().isoformat()
-
-        if metric["memory"] >= 85:
-            incident = {
-                "id": f"INC-MEM-{datetime.utcnow().strftime('%H%M%S')}",
-                "title": f"{service} memory anomaly detected",
-                "service": service,
-                "affected_services": [service],
-                "severity": "SEV-2",
-                "status": "AWAITING_APPROVAL",
-                "incident_type": "MEMORY_LEAK",
-                "signals": [
-                    "memory_growth",
-                    "latency_spike",
-                    "error_rate_increase",
-                ],
-                "diagnosis": {
-                    "agent": "Diagnoser",
-                    "root_cause": f"Memory pressure detected on {service}. Possible memory leak or inefficient cache growth.",
-                    "confidence": 0.84,
-                    "evidence": [
-                        f"Memory usage reached {metric['memory']}%",
-                        f"Latency is {metric['latency_ms']}ms",
-                        f"Error rate is {metric['error_rate']}%",
-                    ],
-                },
-                "remediation": {
-                    "agent": "Remediator",
-                    "action": "ROLLBACK_OR_RESTART",
-                    "command": f"kubectl rollout restart deployment/{service}",
-                    "reason": "Restarting or rolling back can clear memory pressure and restore service stability.",
-                },
-                "safety": {
-                    "agent": "Safety",
-                    "risk": "medium",
-                    "approval_required": True,
-                    "decision": "Human approval required because memory remediation may impact active traffic.",
-                },
-                "timeline": [
-                    {
-                        "agent": "Observer",
-                        "message": f"Detected memory anomaly on {service}.",
-                    },
-                    {
-                        "agent": "Diagnoser",
-                        "message": f"Analyzed metrics and identified memory pressure on {service}.",
-                    },
-                    {
-                        "agent": "Remediator",
-                        "message": "Prepared restart or rollback remediation plan.",
-                    },
-                    {
-                        "agent": "Safety",
-                        "message": "Requested human approval before executing remediation.",
-                    },
-                ],
-                "created_at": now,
-                "updated_at": now,
-            }
-
-            save_incident(incident)
-            created_incidents.append(db_get_incident(incident["id"]))
-
-        elif metric["cpu"] >= 90:
-            incident = {
-                "id": f"INC-CPU-{datetime.utcnow().strftime('%H%M%S')}",
-                "title": f"{service} CPU spike detected",
-                "service": service,
-                "affected_services": [service],
-                "severity": "SEV-3",
-                "status": "RESOLVED",
-                "incident_type": "CPU_SPIKE",
-                "signals": [
-                    "cpu_spike",
-                    "latency_spike",
-                ],
-                "diagnosis": {
-                    "agent": "Diagnoser",
-                    "root_cause": f"High CPU saturation detected on {service}.",
-                    "confidence": 0.80,
-                    "evidence": [
-                        f"CPU usage reached {metric['cpu']}%",
-                        f"Latency is {metric['latency_ms']}ms",
-                        "Service is stateless and safe to scale",
-                    ],
-                },
-                "remediation": {
-                    "agent": "Remediator",
-                    "action": "SCALE_SERVICE",
-                    "command": f"kubectl scale deployment/{service} --replicas=4",
-                    "reason": "Scaling replicas should reduce CPU pressure.",
-                },
-                "safety": {
-                    "agent": "Safety",
-                    "risk": "low",
-                    "approval_required": False,
-                    "decision": "Auto-approved because scaling a stateless service is low risk.",
-                },
-                "timeline": [
-                    {
-                        "agent": "Observer",
-                        "message": f"Detected CPU spike on {service}.",
-                    },
-                    {
-                        "agent": "Diagnoser",
-                        "message": f"Confirmed CPU saturation on {service}.",
-                    },
-                    {
-                        "agent": "Remediator",
-                        "message": "Selected scale service remediation.",
-                    },
-                    {
-                        "agent": "Safety",
-                        "message": "Auto-approved low-risk scaling action.",
-                    },
-                    {
-                        "agent": "Orchestrator",
-                        "message": "Incident resolved after simulated scaling.",
-                    },
-                    {
-                        "agent": "Learner",
-                        "message": "Stored successful CPU spike remediation outcome.",
-                    },
-                ],
-                "created_at": now,
-                "updated_at": now,
-            }
-
-            save_incident(incident)
-            created_incidents.append(db_get_incident(incident["id"]))
-
-    return {
-        "scanned_services": len(metrics),
-        "created_incidents": created_incidents,
     }

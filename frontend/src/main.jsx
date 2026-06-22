@@ -7,6 +7,7 @@ import {
   ShieldCheck,
   Zap,
   RefreshCw,
+  TerminalSquare,
 } from 'lucide-react';
 import './styles.css';
 
@@ -19,9 +20,16 @@ function statusClass(status) {
   return 'active';
 }
 
+function logLevelClass(level) {
+  if (level === 'ERROR') return 'error';
+  if (level === 'WARN') return 'warn';
+  return 'info';
+}
+
 function App() {
   const [incidents, setIncidents] = useState([]);
   const [metrics, setMetrics] = useState([]);
+  const [logs, setLogs] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [loading, setLoading] = useState(false);
 
@@ -51,6 +59,17 @@ function App() {
     }
   }
 
+  async function loadLogs() {
+    try {
+      const res = await fetch(`${API}/logs`);
+      const data = await res.json();
+
+      setLogs(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error('Failed to load logs:', error);
+    }
+  }
+
   async function inject(path) {
     try {
       setLoading(true);
@@ -58,8 +77,7 @@ function App() {
       const res = await fetch(`${API}${path}`, { method: 'POST' });
       const createdIncident = await res.json();
 
-      await loadIncidents();
-      await loadMetrics();
+      await refreshAll();
 
       setSelectedId(createdIncident.id);
     } catch (error) {
@@ -68,25 +86,25 @@ function App() {
       setLoading(false);
     }
   }
+
   async function runObserverScan() {
-  try {
-    setLoading(true);
+    try {
+      setLoading(true);
 
-    const res = await fetch(`${API}/observer/scan`, { method: 'POST' });
-    const data = await res.json();
+      const res = await fetch(`${API}/observer/scan`, { method: 'POST' });
+      const data = await res.json();
 
-    await loadIncidents();
-    await loadMetrics();
+      await refreshAll();
 
-    if (data.created_incidents && data.created_incidents.length > 0) {
-      setSelectedId(data.created_incidents[0].id);
+      if (data.created_incidents && data.created_incidents.length > 0) {
+        setSelectedId(data.created_incidents[0].id);
+      }
+    } catch (error) {
+      console.error('Failed to run observer scan:', error);
+    } finally {
+      setLoading(false);
     }
-  } catch (error) {
-    console.error('Failed to run observer scan:', error);
-  } finally {
-    setLoading(false);
   }
-}
 
   async function approve(id) {
     try {
@@ -94,8 +112,7 @@ function App() {
 
       await fetch(`${API}/incidents/${id}/approve`, { method: 'POST' });
 
-      await loadIncidents();
-      await loadMetrics();
+      await refreshAll();
 
       setSelectedId(id);
     } catch (error) {
@@ -108,6 +125,7 @@ function App() {
   async function refreshAll() {
     await loadIncidents();
     await loadMetrics();
+    await loadLogs();
   }
 
   useEffect(() => {
@@ -121,6 +139,10 @@ function App() {
   }, []);
 
   const selected = incidents.find((incident) => incident.id === selectedId) || incidents[0];
+
+  const selectedServiceLogs = selected
+    ? logs.find((item) => item.service === selected.service)
+    : null;
 
   return (
     <div className="app">
@@ -312,6 +334,36 @@ function App() {
                 ) : (
                   <p className="muted">No plan yet.</p>
                 )}
+              </div>
+            </section>
+
+            <section className="logs-panel card">
+              <div className="card-title">
+                <TerminalSquare size={18} /> Service Logs
+              </div>
+
+              <p className="muted">
+                Recent simulated logs for {selected.service}.
+              </p>
+
+              <div className="logs-list">
+                {(selectedServiceLogs?.logs ?? []).length === 0 && (
+                  <p className="empty">No logs available for this service.</p>
+                )}
+
+                {(selectedServiceLogs?.logs ?? []).map((log, index) => (
+                  <div className="log-row" key={`${log.timestamp}-${index}`}>
+                    <span className="log-time">
+                      {new Date(log.timestamp).toLocaleTimeString()}
+                    </span>
+
+                    <span className={`log-level ${logLevelClass(log.level)}`}>
+                      {log.level}
+                    </span>
+
+                    <span className="log-message">{log.message}</span>
+                  </div>
+                ))}
               </div>
             </section>
 
