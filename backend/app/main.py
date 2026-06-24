@@ -1,5 +1,5 @@
 from datetime import datetime
-
+from app.simulator.docker_metrics import trigger_docker_memory_leak, trigger_docker_recovery
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.simulator.metrics import get_service_metrics
@@ -59,9 +59,78 @@ def get_single_incident(incident_id: str):
 
     return incident
 
+@app.post("/docker/payment-service/memory-leak")
+def start_docker_payment_memory_leak():
+    result = trigger_docker_memory_leak("payment-service")
+    return {
+        "message": "Docker payment-service memory leak started",
+        "docker_response": result,
+    }
+@app.post("/docker/payment-service/recover")
+def recover_docker_payment_service():
+    result = trigger_docker_recovery("payment-service")
+    return {
+        "message": "Docker payment-service recovered",
+        "docker_response": result,
+    }
 
 @app.post("/incidents/{incident_id}/approve")
 def approve_incident(incident_id: str):
+    incident = db_get_incident(incident_id)
+
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    if incident["status"] != "AWAITING_APPROVAL":
+        return incident
+
+    docker_recovery_result = None
+
+    if incident["service"] == "payment-service":
+        docker_recovery_result = trigger_docker_recovery("payment-service")
+
+    incident["status"] = "RESOLVED"
+    incident["updated_at"] = datetime.utcnow().isoformat()
+
+    incident["timeline"].append(
+        {
+            "agent": "Human",
+            "message": "Approved remediation action.",
+        }
+    )
+
+    if docker_recovery_result:
+        incident["timeline"].append(
+            {
+                "agent": "Remediator",
+                "message": "Executed Docker recovery action for payment-service.",
+            }
+        )
+    else:
+        incident["timeline"].append(
+            {
+                "agent": "Remediator",
+                "message": "Executed remediation action.",
+            }
+        )
+
+    incident["timeline"].append(
+        {
+            "agent": "Observer",
+            "message": "Validated recovery after remediation.",
+        }
+    )
+
+    incident["timeline"].append(
+        {
+            "agent": "Learner",
+            "message": "Stored successful remediation outcome.",
+        }
+    )
+
+    save_incident(incident)
+
+    return incident
     incident = db_get_incident(incident_id)
 
     if incident is None:
@@ -265,7 +334,198 @@ def observer_scan():
     created_incidents = []
     skipped_incidents = []
 
+    docker_metrics = [
+        metric for metric in metrics
+        if metric.get("source") == "docker"
+    ]
+
+    for metric in docker_metrics:
+        service = metric["service"]
+        now = datetime.utcnow().isoformat()
+
+        if metric["memory"] >= 85:
+            existing = find_existing_active_incident(service, "MEMORY_LEAK")
+
+            if existing:
+                skipped_incidents.append(
+                    {
+                        "service": service,
+                        "incident_type": "MEMORY_LEAK",
+                        "reason": "Active memory incident already exists",
+                        "existing_incident_id": existing["id"],
+                    }
+                )
+                continue
+
+            incident = {
+                "id": f"INC-MEM-{datetime.utcnow().strftime('%H%M%S')}",
+                "title": f"{service} memory anomaly detected",
+                "service": service,
+                "affected_services": [service],
+                "severity": "SEV-2",
+                "status": "AWAITING_APPROVAL",
+                "incident_type": "MEMORY_LEAK",
+                "signals": [
+                    "memory_growth",
+                    "latency_spike",
+                    "error_rate_increase",
+                ],
+                "diagnosis": {
+                    "agent": "Diagnoser",
+                    "root_cause": f"Memory pressure detected on {service}. Possible memory leak or inefficient cache growth.",
+                    "confidence": 0.84,
+                    "evidence": [
+                        f"Memory usage reached {metric['memory']}%",
+                        f"Latency is {metric['latency_ms']}ms",
+                        f"Error rate is {metric['error_rate']}%",
+                        *build_log_evidence(service),
+                    ],
+                },
+                "remediation": {
+                    "agent": "Remediator",
+                    "action": "DOCKER_RESTART_SERVICE",
+                    "command": f"docker compose restart {service}",
+                    "reason": "Restarting the Docker service can clear memory pressure and restore service stability.",
+                },
+                "safety": {
+                    "agent": "Safety",
+                    "risk": "medium",
+                    "approval_required": True,
+                    "decision": "Human approval required because restarting a Docker service may briefly impact active traffic.",
+                },
+                "timeline": [
+                    {
+                        "agent": "Observer",
+                        "message": f"Detected memory anomaly on Docker service {service}.",
+                    },
+                    {
+                        "agent": "Diagnoser",
+                        "message": f"Analyzed Docker metrics and identified memory pressure on {service}.",
+                    },
+                    {
+                        "agent": "Remediator",
+                        "message": "Prepared Docker service restart remediation plan.",
+                    },
+                    {
+                        "agent": "Safety",
+                        "message": "Requested human approval before executing Docker remediation.",
+                    },
+                ],
+                "created_at": now,
+                "updated_at": now,
+            }
+
+            save_incident(incident)
+            created_incidents.append(db_get_incident(incident["id"]))
+
+        elif metric["cpu"] >= 90:
+            existing = find_existing_active_incident(service, "CPU_SPIKE")
+
+            if existing:
+                skipped_incidents.append(
+                    {
+                        "service": service,
+                        "incident_type": "CPU_SPIKE",
+                        "reason": "Active CPU incident already exists",
+                        "existing_incident_id": existing["id"],
+                    }
+                )
+                continue
+
+            recent = find_recent_incident(service, "CPU_SPIKE", minutes=5)
+
+            if recent:
+                skipped_incidents.append(
+                    {
+                        "service": service,
+                        "incident_type": "CPU_SPIKE",
+                        "reason": "CPU incident already created within cooldown window",
+                        "existing_incident_id": recent["id"],
+                    }
+                )
+                continue
+
+            incident = {
+                "id": f"INC-CPU-{datetime.utcnow().strftime('%H%M%S')}",
+                "title": f"{service} CPU spike detected",
+                "service": service,
+                "affected_services": [service],
+                "severity": "SEV-3",
+                "status": "RESOLVED",
+                "incident_type": "CPU_SPIKE",
+                "signals": [
+                    "cpu_spike",
+                    "latency_spike",
+                ],
+                "diagnosis": {
+                    "agent": "Diagnoser",
+                    "root_cause": f"High CPU saturation detected on Docker service {service}.",
+                    "confidence": 0.80,
+                    "evidence": [
+                        f"CPU usage reached {metric['cpu']}%",
+                        f"Latency is {metric['latency_ms']}ms",
+                        "Service is stateless and safe to restart or scale",
+                        *build_log_evidence(service),
+                    ],
+                },
+                "remediation": {
+                    "agent": "Remediator",
+                    "action": "DOCKER_SCALE_OR_RESTART_SERVICE",
+                    "command": f"docker compose up --scale {service}=2 -d",
+                    "reason": "Scaling or restarting the Docker service can reduce CPU pressure.",
+                },
+                "safety": {
+                    "agent": "Safety",
+                    "risk": "low",
+                    "approval_required": False,
+                    "decision": "Auto-approved because this Docker service is treated as low-risk and stateless.",
+                },
+                "timeline": [
+                    {
+                        "agent": "Observer",
+                        "message": f"Detected CPU spike on Docker service {service}.",
+                    },
+                    {
+                        "agent": "Diagnoser",
+                        "message": f"Confirmed CPU saturation on {service}.",
+                    },
+                    {
+                        "agent": "Remediator",
+                        "message": "Selected Docker scale or restart remediation.",
+                    },
+                    {
+                        "agent": "Safety",
+                        "message": "Auto-approved low-risk Docker remediation action.",
+                    },
+                    {
+                        "agent": "Orchestrator",
+                        "message": "Incident resolved after simulated Docker remediation.",
+                    },
+                    {
+                        "agent": "Learner",
+                        "message": "Stored successful Docker CPU spike remediation outcome.",
+                    },
+                ],
+                "created_at": now,
+                "updated_at": now,
+            }
+
+            save_incident(incident)
+            created_incidents.append(db_get_incident(incident["id"]))
+
+    return {
+        "scanned_services": len(docker_metrics),
+        "created_incidents": created_incidents,
+        "skipped_incidents": skipped_incidents,
+    }
+    metrics = get_service_metrics()
+    created_incidents = []
+    skipped_incidents = []
+
     for metric in metrics:
+        if metric.get("source") != "docker":
+            continue
+
         service = metric["service"]
         now = datetime.utcnow().isoformat()
 
@@ -310,8 +570,8 @@ def observer_scan():
                 "remediation": {
                     "agent": "Remediator",
                     "action": "ROLLBACK_OR_RESTART",
-                    "command": f"kubectl rollout restart deployment/{service}",
-                    "reason": "Restarting or rolling back can clear memory pressure and restore service stability.",
+                    "command": f"docker compose restart {service}",
+                    "reason": "Restarting the Docker service can clear memory pressure and restore service stability.",
                 },
                 "safety": {
                     "agent": "Safety",
